@@ -1,5 +1,10 @@
-variable "domain_name" {
-  description = "Apex domain, e.g. pokemaker.fun. www.<domain> is included and redirects to it."
+variable "zone_name" {
+  description = "The Cloudflare zone, e.g. pokemaker.fun. Its apex and www are reserved for the marketing site."
+  type        = string
+}
+
+variable "hostname" {
+  description = "The app's hostname inside the zone, e.g. app.pokemaker.fun."
   type        = string
 }
 
@@ -8,7 +13,7 @@ variable "cloudflare_zone_id" {
 }
 
 variable "cloudfront_domain_name" {
-  description = "The distribution's *.cloudfront.net name that the CNAMEs point to."
+  description = "The distribution's *.cloudfront.net name that the CNAME points to."
   type        = string
 }
 

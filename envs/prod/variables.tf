@@ -82,9 +82,20 @@ variable "enable_custom_domain" {
 }
 
 variable "domain_name" {
-  description = "Apex domain, registered and DNS-hosted at Cloudflare. www.<domain> redirects to it."
+  description = "The Cloudflare zone (registered and DNS-hosted there). Its apex and www are reserved for the marketing site."
   type        = string
   default     = "pokemaker.fun"
+}
+
+variable "app_subdomain" {
+  description = "The app is served at <app_subdomain>.<domain_name>, e.g. app.pokemaker.fun."
+  type        = string
+  default     = "app"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.app_subdomain)) && var.app_subdomain != "www"
+    error_message = "app_subdomain must be a single DNS label other than www (the apex and www belong to the marketing site)."
+  }
 }
 
 variable "cloudflare_zone_id" {

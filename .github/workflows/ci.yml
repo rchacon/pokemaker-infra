@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform:
+    name: Format and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.15"
+
+      - name: Format
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false: validation needs providers and modules, not state or AWS credentials.
+      - name: Validate envs/prod
+        working-directory: envs/prod
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  cloudfront-function:
+    name: Test CloudFront function
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Test
+        run: node --test tests/*.test.mjs

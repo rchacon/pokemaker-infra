@@ -12,13 +12,13 @@ variable "api_endpoint" {
 }
 
 variable "aliases" {
-  description = "Optional custom domain(s), e.g. [\"cards.example.com\"]. Requires acm_certificate_arn."
+  description = "Optional custom hostname(s), e.g. [\"app.pokemaker.fun\"]. Requires acm_certificate_arn."
   type        = list(string)
   default     = []
 }
 
 variable "canonical_host" {
-  description = "If set (e.g. pokemaker.fun), requests for any other host are redirected here."
+  description = "If set (e.g. app.pokemaker.fun), requests for any other host are redirected here."
   type        = string
   default     = null
 }

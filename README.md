@@ -5,7 +5,7 @@ application code lives in [`pokemaker-api`](../pokemaker-api) and
 [`pokemaker-app`](../pokemaker-app).
 
 ```text
-             https://pokemaker.fun   (www → 301 → apex; DNS at Cloudflare)
+             https://app.pokemaker.fun   (DNS at Cloudflare)
                                      │
                               CloudFront (CDN)
                      ┌───────────────┴────────────────┐
@@ -32,7 +32,8 @@ modules/
 ├── storage/    DynamoDB table (on-demand, TTL, PITR) + private artwork bucket (CORS for exports)
 ├── api/        Lambda, least-privilege IAM role, HTTP API with throttling, log groups
 ├── frontend/   Private site bucket, CloudFront (OAC, redirect + SPA function, /api/* behavior)
-└── domain/     pokemaker.fun: ACM certificate (us-east-1) + Cloudflare DNS records
+└── domain/     app.pokemaker.fun: ACM certificate (us-east-1) + Cloudflare DNS records
+tests/          Node tests for the CloudFront viewer-request function
 envs/
 └── prod/       Root module: wires the modules together, plus an optional AWS budget alert
 ```
@@ -105,7 +106,7 @@ TABLE_NAME=pokemaker AWS_REGION=us-east-1 DYNAMODB_ENDPOINT_URL= S3_ENDPOINT_URL
 cd ../pokemaker-app && ./scripts/deploy.sh    # reads site_bucket + distribution id from Terraform outputs
 ```
 
-Open the `site_url` output (https://pokemaker.fun once the custom domain is on). To ship a new API version, rebuild the zip and run
+Open the `site_url` output (https://app.pokemaker.fun once the custom domain is on). To ship a new API version, rebuild the zip and run
 `terraform apply` again: the zip's hash changes, so Lambda updates.
 
 ## Cost
@@ -170,24 +171,28 @@ provider), have the API authorize every request against family membership, and
 consider AWS WAF rate-based rules. The data model already supports this without
 migrating card keys (see `pokemaker-api/README.md`).
 
-## Custom domain: pokemaker.fun
+## Custom domain: app.pokemaker.fun
 
-The site is served at **https://pokemaker.fun**; `www.pokemaker.fun` and the raw
-`*.cloudfront.net` address 301-redirect there (path and query kept), so there
-is one canonical URL. The domain is registered and DNS-hosted at Cloudflare.
+The app is served at **https://app.pokemaker.fun**. The raw `*.cloudfront.net`
+address 301-redirects there (path and query kept), so there is one canonical URL.
+The domain is registered and DNS-hosted at Cloudflare.
+
+**The apex (`pokemaker.fun`) and `www.pokemaker.fun` are reserved for a separate
+marketing site.** This repo never creates records for them: the domain module
+manages exactly one hostname, refuses the apex or `www` (a precondition and a
+variable validation), and only creates that hostname's certificate-validation
+record and CNAME. To serve the app elsewhere, change `app_subdomain`.
 
 `modules/domain` creates:
 
-- an ACM certificate for `pokemaker.fun` + `www.pokemaker.fun` in **us-east-1**
-  (CloudFront's requirement, whatever `aws_region` is), validated via DNS;
-- the validation records and the site's records in Cloudflare: the apex and
-  `www` are CNAMEs to the distribution (Cloudflare flattens the apex CNAME).
-  All are **DNS-only (grey cloud)**: CloudFront is already the CDN and holds the
-  certificate, and a proxied record in front would be a second CDN.
+- an ACM certificate for `app.pokemaker.fun` in **us-east-1** (CloudFront's
+  requirement, whatever `aws_region` is), validated via DNS;
+- in Cloudflare, the validation record and a CNAME from `app` to the
+  distribution, both **DNS-only (grey cloud)**: CloudFront is already the CDN and
+  holds the certificate, so a proxied record would put a second CDN in front.
 
 The redirect is done by the site's CloudFront Function
-(`modules/frontend/viewer_request.js.tftpl`), not a Cloudflare rule, so nothing
-needs Cloudflare's proxy.
+(`modules/frontend/viewer_request.js.tftpl`, tested in `tests/`).
 
 It's gated behind `enable_custom_domain` so the first apply needs no Cloudflare
 access:
@@ -206,14 +211,21 @@ access:
    ```
 
    then `terraform apply`. The apply waits for ACM to issue the certificate
-   (usually a few minutes once the validation records exist), attaches it to
-   CloudFront, and points the apex and `www` at the distribution. CloudFront can
-   take another ~5–15 minutes to roll out the aliases.
+   (usually a few minutes once the validation record exists), attaches it to
+   CloudFront, and points `app` at the distribution. CloudFront can take
+   another ~5–15 minutes to roll out the alias.
 
-If the zone already has apex or `www` records (Cloudflare often adds parking
-records for new domains), delete them first, or the create fails with a
-"record already exists" error.
+If the zone already has an `app` record, delete it first, or the create fails
+with "record already exists". Records Cloudflare added for the apex or `www` are
+left alone; they belong to the marketing site.
 
 The Cloudflare token sits in the gitignored `terraform.tfvars` and is marked
-sensitive, but like any provider credential it is not stored in state.
-Treat `terraform.tfvars` as a secret file.
+sensitive; provider credentials are not stored in state. Treat
+`terraform.tfvars` as a secret file.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`:
+`terraform fmt -check`, `terraform init -backend=false` + `validate` for
+`envs/prod`, and the CloudFront function's Node tests. Nothing in CI touches AWS
+or Cloudflare.

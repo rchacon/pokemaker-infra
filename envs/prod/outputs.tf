@@ -1,5 +1,5 @@
 output "site_url" {
-  value = var.enable_custom_domain ? "https://${var.domain_name}" : "https://${module.frontend.domain_name}"
+  value = var.enable_custom_domain ? "https://${local.app_host}" : "https://${module.frontend.domain_name}"
 }
 
 output "site_domain" {

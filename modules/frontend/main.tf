@@ -52,7 +52,7 @@ resource "aws_s3_bucket_policy" "site" {
 }
 
 # Runs on every request for the site (not /api/*):
-# 1. Canonical host: any other host (www.<domain>, the raw *.cloudfront.net
+# 1. Canonical host: any other host (in practice the raw *.cloudfront.net
 #    name) gets a 301 to https://<canonical_host> with the same path and query.
 # 2. SPA routing: app routes like /p/kid1/cards/new are served index.html,
 #    while real files (/assets/*.js, /favicon.svg) pass through. Done here

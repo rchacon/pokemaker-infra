@@ -1,5 +1,6 @@
 locals {
-  name = "pokemaker-${var.environment}"
+  name     = "pokemaker-${var.environment}"
+  app_host = "${var.app_subdomain}.${var.domain_name}"
   tags = {
     app         = "pokemaker"
     environment = var.environment
@@ -8,7 +9,7 @@ locals {
   # Browser origins allowed to load artwork (needed for PNG/PDF export).
   site_origins = concat(
     ["https://${module.frontend.domain_name}"],
-    var.enable_custom_domain ? ["https://${var.domain_name}", "https://www.${var.domain_name}"] : [],
+    var.enable_custom_domain ? ["https://${local.app_host}"] : [],
   )
 }
 
@@ -52,10 +53,10 @@ module "frontend" {
   name                = local.name
   site_bucket_name    = "${local.name}-site-${data.aws_caller_identity.current.account_id}"
   api_endpoint        = module.api.api_endpoint
-  aliases             = var.enable_custom_domain ? module.domain[0].aliases : []
+  aliases             = var.enable_custom_domain ? [module.domain[0].hostname] : []
   acm_certificate_arn = var.enable_custom_domain ? module.domain[0].certificate_arn : null
-  # www and the raw *.cloudfront.net name redirect to the apex.
-  canonical_host = var.enable_custom_domain ? var.domain_name : null
+  # The raw *.cloudfront.net name redirects to the app's hostname.
+  canonical_host = var.enable_custom_domain ? local.app_host : null
 }
 
 module "domain" {
@@ -66,7 +67,8 @@ module "domain" {
     aws = aws.us_east_1
   }
 
-  domain_name            = var.domain_name
+  zone_name              = var.domain_name
+  hostname               = local.app_host
   cloudflare_zone_id     = var.cloudflare_zone_id
   cloudfront_domain_name = module.frontend.domain_name
 }

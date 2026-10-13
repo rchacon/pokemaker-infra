@@ -7,6 +7,7 @@
 
 # Custom domain (second apply, see README):
 # enable_custom_domain = true
-# domain_name          = "pokemaker.fun"
+# domain_name          = "pokemaker.fun"   # zone; apex + www are for the marketing site
+# app_subdomain        = "app"             # -> https://app.pokemaker.fun
 # cloudflare_zone_id   = "<zone id from the Cloudflare dashboard>"
 # cloudflare_api_token = "<token scoped to Zone:DNS:Edit on pokemaker.fun only>"

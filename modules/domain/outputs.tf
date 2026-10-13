@@ -1,8 +1,8 @@
 output "certificate_arn" {
   description = "ARN of the *validated* certificate (waits for issuance)."
-  value       = aws_acm_certificate_validation.site.certificate_arn
+  value       = aws_acm_certificate_validation.app.certificate_arn
 }
 
-output "aliases" {
-  value = [var.domain_name, local.www]
+output "hostname" {
+  value = var.hostname
 }
