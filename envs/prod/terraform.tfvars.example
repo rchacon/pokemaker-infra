@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored). Everything here has a sensible default.
+# budget_alert_email          = "you@example.com"
+# monthly_budget_usd          = 10
+# lambda_reserved_concurrency = 5
+# daily_generation_limit      = 10
+# artwork_provider            = "mock"   # deploy without paying for images
+
+# Custom domain (second apply, see README):
+# enable_custom_domain = true
+# domain_name          = "pokemaker.fun"
+# cloudflare_zone_id   = "<zone id from the Cloudflare dashboard>"
+# cloudflare_api_token = "<token scoped to Zone:DNS:Edit on pokemaker.fun only>"

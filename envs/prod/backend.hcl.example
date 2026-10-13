@@ -1,0 +1,5 @@
+# Copy to backend.hcl (gitignored) and fill in. An existing state bucket works;
+# each project/environment just needs its own key.
+bucket = "your-terraform-state-bucket"
+key    = "pokemaker/prod/terraform.tfstate"
+region = "us-east-1"

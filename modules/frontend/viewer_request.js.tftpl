@@ -1,0 +1,35 @@
+// CloudFront Function (cloudfront-js-2.0), viewer-request on the site behavior.
+var CANONICAL_HOST = "${canonical_host}";
+
+function queryString(querystring) {
+  var parts = [];
+  for (var key in querystring) {
+    var entry = querystring[key];
+    var values = entry.multiValue ? entry.multiValue : [entry];
+    for (var i = 0; i < values.length; i++) {
+      parts.push(values[i].value === "" ? key : key + "=" + values[i].value);
+    }
+  }
+  return parts.length ? "?" + parts.join("&") : "";
+}
+
+function handler(event) {
+  var request = event.request;
+  var host = request.headers.host ? request.headers.host.value : "";
+
+  if (CANONICAL_HOST && host !== CANONICAL_HOST) {
+    return {
+      statusCode: 301,
+      statusDescription: "Moved Permanently",
+      headers: {
+        location: { value: "https://" + CANONICAL_HOST + request.uri + queryString(request.querystring) },
+      },
+    };
+  }
+
+  var last = request.uri.split("/").pop();
+  if (last.indexOf(".") === -1) {
+    request.uri = "/index.html";
+  }
+  return request;
+}

@@ -1,0 +1,35 @@
+variable "name" {
+  type = string
+}
+
+variable "site_bucket_name" {
+  type = string
+}
+
+variable "api_endpoint" {
+  description = "API Gateway endpoint (https://...), served under /api/* on the site."
+  type        = string
+}
+
+variable "aliases" {
+  description = "Optional custom domain(s), e.g. [\"cards.example.com\"]. Requires acm_certificate_arn."
+  type        = list(string)
+  default     = []
+}
+
+variable "canonical_host" {
+  description = "If set (e.g. pokemaker.fun), requests for any other host are redirected here."
+  type        = string
+  default     = null
+}
+
+variable "acm_certificate_arn" {
+  description = "ACM certificate in us-east-1 covering the aliases."
+  type        = string
+  default     = null
+}
+
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
