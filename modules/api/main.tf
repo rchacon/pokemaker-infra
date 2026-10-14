@@ -25,7 +25,7 @@ resource "aws_lambda_function" "api" {
   role             = aws_iam_role.lambda.arn
   runtime          = "python3.12"
   architectures    = ["arm64"] # Graviton: ~20% cheaper per GB-second
-  handler          = "src.main.handler"
+  handler          = "pokemaker.main.handler"
   filename         = var.lambda_zip_path
   source_code_hash = filebase64sha256(var.lambda_zip_path)
   memory_size      = var.memory_mb
