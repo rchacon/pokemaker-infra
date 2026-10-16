@@ -1,6 +1,6 @@
 # Static site: private S3 bucket behind CloudFront (Origin Access Control).
-# CloudFront also routes /api/* to API Gateway, so the app and the API share one
-# origin: no CORS, and the frontend never needs to know the API's address.
+# CloudFront also routes /api/* to the API server, so the app and the API share
+# one origin: no CORS, and the frontend never needs to know the API's address.
 
 resource "aws_s3_bucket" "site" {
   bucket        = var.site_bucket_name
@@ -86,7 +86,6 @@ data "aws_cloudfront_response_headers_policy" "security" {
 locals {
   api_origin_id  = "api"
   site_origin_id = "site"
-  api_domain     = replace(var.api_endpoint, "https://", "")
 }
 
 resource "aws_cloudfront_distribution" "site" {
@@ -105,13 +104,21 @@ resource "aws_cloudfront_distribution" "site" {
 
   origin {
     origin_id   = local.api_origin_id
-    domain_name = local.api_domain
+    domain_name = var.api_origin_hostname
     custom_origin_config {
       http_port              = 80
       https_port             = 443
-      origin_protocol_policy = "https-only"
+      origin_protocol_policy = "https-only" # the server has a Let's Encrypt certificate
       origin_ssl_protocols   = ["TLSv1.2"]
-      origin_read_timeout    = 60
+      # How long CloudFront waits for the first byte and between chunks. The
+      # longest wait is an artwork generation; a streamed response keeps it alive.
+      origin_read_timeout      = 60
+      origin_keepalive_timeout = 30
+    }
+    # Proves to the server that a request came through *this* distribution.
+    custom_header {
+      name  = "X-Origin-Verify"
+      value = var.origin_verify_secret
     }
   }
 
@@ -136,7 +143,7 @@ resource "aws_cloudfront_distribution" "site" {
     viewer_protocol_policy   = "https-only"
     allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
     cached_methods           = ["GET", "HEAD"]
-    compress                 = true
+    compress                 = false # don't buffer streamed responses (partial artwork)
     cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_except_host.id
   }

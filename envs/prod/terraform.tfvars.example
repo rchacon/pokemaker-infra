@@ -1,13 +1,19 @@
-# Copy to terraform.tfvars (gitignored). Everything here has a sensible default.
-# budget_alert_email          = "you@example.com"
-# monthly_budget_usd          = 10
-# lambda_reserved_concurrency = 5
-# daily_generation_limit      = 10
-# artwork_provider            = "mock"   # deploy without paying for images
+# Copy to terraform.tfvars (gitignored). Treat it as a secret file: it holds the
+# Cloudflare token.
 
-# Custom domain (second apply, see README):
-# enable_custom_domain = true
-# domain_name          = "pokemaker.fun"   # zone; apex + www are for the marketing site
-# app_subdomain        = "app"             # -> https://app.pokemaker.fun
-# cloudflare_zone_id   = "<zone id from the Cloudflare dashboard>"
-# cloudflare_api_token = "<token scoped to Zone:DNS:Edit on pokemaker.fun only>"
+# Required: DNS for app.pokemaker.fun and api.pokemaker.fun lives at Cloudflare.
+cloudflare_zone_id   = "<zone id from the Cloudflare dashboard>"
+cloudflare_api_token = "<token scoped to Zone:DNS:Edit on pokemaker.fun only>"
+
+# Optional (defaults shown):
+# domain_name            = "pokemaker.fun"   # apex + www are for the marketing site
+# app_subdomain          = "app"             # -> https://app.pokemaker.fun
+# api_subdomain          = "api"             # -> api.pokemaker.fun (CloudFront's origin)
+# instance_type          = "t4g.micro"
+# acme_email             = "you@example.com" # Let's Encrypt expiry notices
+# artwork_provider       = "openai"          # or "mock" to deploy without paying for images
+# openai_image_model     = "gpt-image-1-mini"
+# openai_image_quality   = "medium"
+# daily_generation_limit = 10
+# budget_alert_email     = "you@example.com"
+# monthly_budget_usd     = 20

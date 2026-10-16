@@ -5,94 +5,154 @@ application code lives in [`pokemaker-api`](../pokemaker-api) and
 [`pokemaker-app`](../pokemaker-app).
 
 ```text
-             https://app.pokemaker.fun   (DNS at Cloudflare)
+                      https://app.pokemaker.fun   (DNS at Cloudflare)
                                      │
                               CloudFront (CDN)
-                     ┌───────────────┴────────────────┐
-                 /* (static)                       /api/*
-                     │                                │
-           S3 site bucket (private, OAC)    API Gateway HTTP API (throttled)
-                                                      │
-                                             Lambda: FastAPI + Mangum
-                                          (python3.12, arm64, no VPC)
-                                   ┌──────────┬───────┴───────┬──────────────┐
+                     ┌───────────────┴─────────────────┐
+                 /* (static)                        /api/*  (+ secret X-Origin-Verify header)
+                     │                                 │
+           S3 site bucket (private, OAC)      api.pokemaker.fun:443 (Elastic IP)
+                                                       │  security group: CloudFront only
+                                          EC2 t4g.micro, Ubuntu 24.04 arm64
+                                          Docker: ghcr.io/rchacon/pokemaker-api
+                                          (one async Uvicorn process, TLS via Let's Encrypt)
+                                   ┌──────────┬────────┴──────┬──────────────┐
                                 DynamoDB   S3 artwork     SSM Parameter     OpenAI
-                               (on-demand)  (private)    (OpenAI key)     Images API
+                               (on-demand)  (private)    Store (secrets)  Images API
 ```
 
-Everything is pay-per-use. There are no EC2 instances, containers, NAT Gateways
-or VPCs. Serving the app and the API from **one CloudFront origin** means the
-frontend calls a relative `/api` path, the same as with Vite's local proxy, so
-the API needs no CORS.
+The API runs as **one long-lived async process**, so a single event loop
+interleaves many requests that are mostly waiting on DynamoDB, S3 or OpenAI (see
+`pokemaker-api`'s README). Serving the app and the API from **one CloudFront
+distribution** means the frontend calls a relative `/api` path, the same as with
+Vite's local proxy, so the API needs no CORS.
+
+There is no load balancer, NAT Gateway, API Gateway or SSH. The server sits in
+the default VPC with a public address that only CloudFront may reach.
 
 ## Layout
 
 ```text
 modules/
 ├── storage/    DynamoDB table (on-demand, TTL, PITR) + private artwork bucket (CORS for exports)
-├── api/        Lambda, least-privilege IAM role, HTTP API with throttling, log groups
-├── frontend/   Private site bucket, CloudFront (OAC, redirect + SPA function, /api/* behavior)
-└── domain/     app.pokemaker.fun: ACM certificate (us-east-1) + Cloudflare DNS records
-tests/          Node tests for the CloudFront viewer-request function
+├── server/     EC2 instance, instance role, CloudFront-only security group, Elastic IP,
+│               log group, app settings in SSM, first-boot script (user_data.sh.tftpl)
+├── frontend/   Private site bucket, CloudFront (OAC, redirect + SPA function, /api/* → server)
+└── domain/     app.pokemaker.fun (ACM cert + CNAME) and api.pokemaker.fun (A record), at Cloudflare
 envs/
 └── prod/       Root module: wires the modules together, plus an optional AWS budget alert
+tests/          Node tests for the CloudFront viewer-request function
 ```
 
 To add another environment, copy `envs/prod` to `envs/dev` and change
-`environment` and the backend `key`.
+`environment`, the SSM parameter names and the backend `key`.
+
+## How the server works
+
+- **Image:** CI in `pokemaker-api` builds an arm64 image and publishes it to
+  `ghcr.io/rchacon/pokemaker-api` (public; nothing secret is in it).
+- **First boot** (`modules/server/user_data.sh.tftpl`, run once by cloud-init):
+  1. Installs Docker, certbot (with its Cloudflare DNS plugin) and the AWS CLI;
+     adds swap; enables automatic security-update reboots at 10:00 UTC.
+  2. Gets a Let's Encrypt certificate for `api.pokemaker.fun` using a Cloudflare
+     DNS check, so port 80 never opens. Certbot renews it automatically, and a
+     hook hands the new certificate to the container and restarts it.
+  3. Installs `pokemaker-deploy` (below), then starts the last-deployed image, if
+     there is one.
+- **Deploys:** `pokemaker-api/scripts/deploy.sh` runs `pokemaker-deploy <image>`
+  on the instance through **SSM Run Command**. That command:
+  1. refreshes the app settings from SSM,
+  2. pulls the image,
+  3. replaces the container,
+  4. health-checks `https://api.pokemaker.fun/api/health` the way CloudFront
+     reaches it (same certificate and secret header).
+
+  If the new container fails to start or isn't healthy, it rolls back to the
+  previous image. Each successful deploy is recorded in SSM
+  (`/pokemaker/prod/api-image`), so a replaced instance comes back on the same
+  version by itself.
+- **Logs:** the container's output goes to CloudWatch Logs
+  (`/pokemaker/prod/api`, 14 days) through Docker's `awslogs` driver.
+- **Credentials:** an **instance role** with the same least-privilege policy the
+  app always had: its table, its family's artwork prefix, a handful of SSM
+  parameters. There are no access keys anywhere.
+- **Settings:** an env file stored in SSM (`/pokemaker/prod/api-config`) and
+  written by Terraform. Change a setting with `terraform apply`, then redeploy.
+- **The server holds no data.** Cards live in DynamoDB and artwork in S3, so the
+  instance can be replaced at any time. Changing the bootstrap script replaces
+  it automatically.
 
 ## Deploying
 
 Prerequisites: Terraform ≥ 1.10, the AWS CLI with credentials, an S3 bucket for
-Terraform state (an existing one is fine), and Python 3.12 (to build the Lambda zip).
+Terraform state (an existing one is fine), and the `pokemaker.fun` zone in
+Cloudflare.
 
-### 1. Build the Lambda package
+### 1. Create the secrets (outside Terraform)
 
-```bash
-cd ../pokemaker-api && ./scripts/build_lambda.sh   # → dist/lambda.zip
-```
-
-### 2. Store the OpenAI API key in SSM (outside Terraform)
-
-The key never appears in Terraform code, state or variables. Terraform only knows
-the parameter's *name* and grants the Lambda permission to read it.
+Secrets never appear in Terraform code, state or variables. Terraform only knows
+the parameter *names* and grants the server permission to read them.
 
 ```bash
-read -rs OPENAI_KEY   # paste the key, press Enter (keeps it out of shell history)
-aws ssm put-parameter --region us-east-1 \
-  --name /pokemaker/prod/openai-api-key --type SecureString --value "$OPENAI_KEY"
+# OpenAI API key (paste it at the prompt; keeps it out of shell history)
+read -rs OPENAI_KEY
+aws ssm put-parameter --region us-east-1 --type SecureString \
+  --name /pokemaker/prod/openai-api-key --value "$OPENAI_KEY"
 unset OPENAI_KEY
-```
 
-Also create the secret that signs profile-unlock tokens (see "Profile PINs" below):
-
-```bash
-aws ssm put-parameter --region us-east-1 \
-  --name /pokemaker/prod/pin-token-secret --type SecureString \
+# Secret that signs profile-unlock (PIN) tokens
+aws ssm put-parameter --region us-east-1 --type SecureString \
+  --name /pokemaker/prod/pin-token-secret \
   --value "$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+
+# Cloudflare token the server uses for its TLS certificate (DNS check).
+# Create it from the "Edit zone DNS" template, limited to the pokemaker.fun zone.
+read -rs CF_TOKEN
+aws ssm put-parameter --region us-east-1 --type SecureString \
+  --name /pokemaker/prod/cloudflare-dns-token --value "$CF_TOKEN"
+unset CF_TOKEN
 ```
 
-A SecureString parameter in the Standard tier is free. It uses the AWS-managed
-`aws/ssm` KMS key. Rotate the key with `--overwrite`. Warm Lambdas cache it for
-their lifetime, so they pick up a new key on their next cold start.
+SecureString parameters in the Standard tier are free and use the AWS-managed
+`aws/ssm` key. To rotate one, use `--overwrite`, then redeploy (or reboot, for
+the Cloudflare token). To deploy without spending anything on images at first,
+set `artwork_provider = "mock"`; the OpenAI parameter must still exist, but its
+value is never used.
 
-> To deploy without spending anything on images first, set
-> `artwork_provider = "mock"` and skip the OpenAI key (the PIN secret is still required).
-
-### 3. Apply
+### 2. Apply
 
 ```bash
 cd envs/prod
 cp backend.hcl.example backend.hcl            # set your state bucket
-cp terraform.tfvars.example terraform.tfvars  # optional overrides (budget email, ...)
+cp terraform.tfvars.example terraform.tfvars  # Cloudflare zone ID + token, optional overrides
 terraform init -backend-config=backend.hcl
 terraform apply
+```
+
+The apply creates:
+- the table, the buckets and CloudFront,
+- the certificate for `app.pokemaker.fun`, validated through Cloudflare (usually
+  a few minutes),
+- the server, its Elastic IP and `api.pokemaker.fun`.
+
+The server's first boot takes a few more minutes, mostly package installs and
+the certificate; you can follow it in `/var/log/cloud-init-output.log` (see
+Operations).
+
+If the zone already has an `app` or `api` record, delete it first, or the create
+fails with "record already exists". Records for the apex and `www` are never
+touched; they belong to the marketing site.
+
+### 3. Deploy the API
+
+```bash
+cd ../../../pokemaker-api
+./scripts/deploy.sh main      # or sha-<commit> for a specific build
 ```
 
 ### 4. Seed the profiles
 
 ```bash
-cd ../../../pokemaker-api
 TABLE_NAME=pokemaker AWS_REGION=us-east-1 DYNAMODB_ENDPOINT_URL= S3_ENDPOINT_URL= \
   python scripts/seed_profiles.py --name kid1="Nickname 1" --name kid2="Nickname 2" \
     --name dad="Dad" --parent dad
@@ -103,125 +163,112 @@ TABLE_NAME=pokemaker AWS_REGION=us-east-1 DYNAMODB_ENDPOINT_URL= S3_ENDPOINT_URL
 ### 5. Publish the frontend
 
 ```bash
-cd ../pokemaker-app && ./scripts/deploy.sh    # reads site_bucket + distribution id from Terraform outputs
+cd ../pokemaker-app && ./scripts/deploy.sh    # reads the bucket and distribution from Terraform outputs
 ```
 
-Open the `site_url` output (https://app.pokemaker.fun once the custom domain is on). To ship a new API version, rebuild the zip and run
-`terraform apply` again: the zip's hash changes, so Lambda updates.
+Then open https://app.pokemaker.fun.
+
+## Operations
+
+| Task | How |
+| --- | --- |
+| Ship a new API version | Merge to `main` (CI publishes the image), then `./scripts/deploy.sh` in pokemaker-api |
+| Roll back | `./scripts/deploy.sh sha-<older commit>` |
+| Change an app setting | Edit `terraform.tfvars`, `terraform apply`, then redeploy the current tag |
+| Shell on the server | `aws ssm start-session --target "$(terraform output -raw instance_id)"` (no SSH) |
+| Follow the API's logs | `aws logs tail /pokemaker/prod/api --follow` |
+| First-boot log | in a session: `sudo tail -f /var/log/cloud-init-output.log` |
+| Replace the server | `terraform apply -replace=module.server.aws_instance.server`; it redeploys the last image |
 
 ## Cost
 
-At family scale, AWS should cost cents per month, often nothing beyond free tiers:
+At family scale, roughly **$10–11 a month** for AWS, plus OpenAI:
 
-| Service | Pricing model | Expected |
-| --- | --- | --- |
-| Lambda (arm64, 512 MB) | per request + GB-second | Free tier covers it |
-| API Gateway HTTP API | $1 per million requests | ≈ $0 |
-| DynamoDB on-demand (+PITR) | per request, per GB stored | Pennies |
-| S3 (site + artwork) | per GB stored, per request | Pennies |
-| CloudFront | per GB out, per request | Free tier covers it |
-| CloudWatch Logs (14-day retention) | per GB ingested | Pennies |
+| Item | ≈ Monthly |
+| --- | --- |
+| EC2 `t4g.micro` (on-demand) | ~$6.10 |
+| Public IPv4 (Elastic IP) | ~$3.65 |
+| 10 GB gp3 root volume | ~$0.80 |
+| DynamoDB on-demand, S3, CloudFront, CloudWatch Logs, SSM | cents (mostly free tiers) |
 
-**OpenAI image generation is the real cost.** It's bounded by the API's
-server-side daily quota (default 10 images per family per day). Also, in the
-**OpenAI dashboard**, create a dedicated project for PokeMaker with a low monthly
-budget and email alerts. Treat those as alerts, not a guaranteed hard cap.
+These are third-party estimates for us-east-1; check AWS's pricing pages. A
+1-year Savings Plan or Spot (interruptions are tolerable here) can cut the
+instance cost substantially.
+
+**OpenAI image generation is the variable cost.** It's bounded by the API's
+server-side daily quota (default 10 images per family per day). In the OpenAI
+dashboard, give PokeMaker its own project with a monthly budget and email
+alerts, and consider prepaid credits with auto-recharge off as a hard cap.
 
 Set `budget_alert_email` to get an AWS Budgets email at 80% of actual and 100% of
-forecast spend (default $10/month). The budget filters on the `app=pokemaker` tag,
-so activate `app` as a **cost allocation tag** in the Billing console once
+forecast spend (default $20/month). The budget filters on the `app=pokemaker`
+tag, so activate `app` as a **cost allocation tag** in the Billing console once
 resources exist.
-
-## Cost and abuse controls in this repo
-
-- **API Gateway throttling**: 10 req/s steady, burst 20, across the whole API.
-- **Lambda timeout** of 120 s, and optional `lambda_reserved_concurrency` (for
-  example 5) to cap parallel invocations. New AWS accounts often have a total
-  concurrency limit of 10 and can't reserve any; leave it `null` there.
-- **Image parameters** (model, quality, size) are fixed in Lambda environment
-  variables and validated against allowlists by the API.
-- **Logs**: API Gateway access logs record metadata only, never request bodies
-  (they contain the kids' card text). 14-day retention.
 
 ## Security: what this MVP does and does not protect
 
-**There is no authentication.** Both the CloudFront URL and the raw
-`api_endpoint` output are public:
+**There is no authentication.** https://app.pokemaker.fun is public:
 
-- Anyone who learns either URL can read, change or delete cards and use up the
-  daily artwork quota.
+- Anyone who learns the address can read every card and use up the daily
+  artwork quota.
 - Choosing a child's profile in the app is a convenience, **not authorization**.
 - An unguessable URL is not a security mechanism.
-- Throttling and quotas limit cost and abuse; they provide **no privacy**.
+- **Profile PINs** keep siblings from *changing* each other's cards. The API
+  enforces them, with a lockout after 5 wrong tries, but they hide nothing.
 
-**Profile PINs** keep siblings out of each other's collections: changes to a
-PIN-protected profile need a short-lived unlock token, checked by the API. They
-are a household-level guard, not real security. Without accounts, anyone with
-the address can still *read* every card, and a 4-digit PIN only resists
-guessing because the API locks a profile for 5 minutes after 5 wrong tries.
-Rotating the PIN secret parameter signs everyone out.
+What is in place:
 
-What is in place: private S3 buckets (site via CloudFront OAC; artwork only via
-short-lived presigned URLs), least-privilege IAM (the Lambda can touch only its
-table, this family's artwork prefix and one SSM parameter), encryption at rest,
-HTTPS only, and no secrets in Terraform state.
+- **The server only accepts CloudFront.** The security group allows port 443
+  only from CloudFront's origin-facing address list. Those addresses are shared
+  by every CloudFront distribution, so the app also requires a secret header
+  that only *this* distribution sends (403 otherwise). Visiting
+  `api.pokemaker.fun` directly doesn't work.
+- **No SSH, no open ports besides 443.** Shell access is SSM Session Manager.
+  IMDSv2 is required. Security updates install automatically, and the container
+  runs as a non-root user.
+- **No long-lived credentials:** an instance role, scoped to this app's table,
+  its family's artwork prefix and a few SSM parameters.
+- **Secrets in SSM Parameter Store:** created by hand, never in Terraform. The
+  one exception is the CloudFront origin secret. Terraform generates it because
+  CloudFront's configuration must contain it; it grants nothing beyond "this
+  request came through our distribution".
+- **Private S3:** the site goes through CloudFront OAC, and artwork only through
+  short-lived presigned URLs.
+- **Abuse limits:** a per-IP rate limit in the app (600 requests/min by default;
+  a family shares one IP), request-size limits, and the daily artwork quota.
 
 Before opening PokeMaker to other families, add Cognito (or another identity
-provider), have the API authorize every request against family membership, and
-consider AWS WAF rate-based rules. The data model already supports this without
-migrating card keys (see `pokemaker-api/README.md`).
+provider), and have the API authorize every request against family membership.
+For extra protection, consider AWS WAF on CloudFront (about $6 a month or
+more). The data model already supports this without migrating card keys (see
+`pokemaker-api/README.md`).
 
-## Custom domain: app.pokemaker.fun
+## Domain: app.pokemaker.fun and api.pokemaker.fun
 
-The app is served at **https://app.pokemaker.fun**. The raw `*.cloudfront.net`
-address 301-redirects there (path and query kept), so there is one canonical URL.
-The domain is registered and DNS-hosted at Cloudflare.
+`pokemaker.fun` is registered and DNS-hosted at Cloudflare. This repo manages
+exactly two hostnames:
+
+| Hostname | Record | Purpose |
+| --- | --- | --- |
+| `app.pokemaker.fun` | CNAME → CloudFront | The app. ACM certificate (us-east-1), validated via a Cloudflare DNS record |
+| `api.pokemaker.fun` | A → the server's Elastic IP | CloudFront's origin for `/api/*`. Let's Encrypt certificate, issued on the server |
 
 **The apex (`pokemaker.fun`) and `www.pokemaker.fun` are reserved for a separate
-marketing site.** This repo never creates records for them: the domain module
-manages exactly one hostname, refuses the apex or `www` (a precondition and a
-variable validation), and only creates that hostname's certificate-validation
-record and CNAME. To serve the app elsewhere, change `app_subdomain`.
+marketing site.** The domain module refuses them (a precondition, plus variable
+validation on `app_subdomain` and `api_subdomain`).
 
-`modules/domain` creates:
+All records are **DNS-only (grey cloud)**. CloudFront is already the CDN and
+holds the app's certificate. For `api`, Cloudflare's proxy would hide
+CloudFront's addresses from the server's firewall.
 
-- an ACM certificate for `app.pokemaker.fun` in **us-east-1** (CloudFront's
-  requirement, whatever `aws_region` is), validated via DNS;
-- in Cloudflare, the validation record and a CNAME from `app` to the
-  distribution, both **DNS-only (grey cloud)**: CloudFront is already the CDN and
-  holds the certificate, so a proxied record would put a second CDN in front.
-
-The redirect is done by the site's CloudFront Function
+The raw `*.cloudfront.net` address 301-redirects to `https://app.pokemaker.fun`
+(path and query kept), via the site's CloudFront Function
 (`modules/frontend/viewer_request.js.tftpl`, tested in `tests/`).
 
-It's gated behind `enable_custom_domain` so the first apply needs no Cloudflare
-access:
-
-1. **Pass 1:** apply as described above and check the site on the
-   `*.cloudfront.net` URL.
-2. Create a Cloudflare API token from the **"Edit zone DNS"** template, limited
-   to the `pokemaker.fun` zone only (never the Global API Key). Copy the
-   **Zone ID** from the domain's Overview page.
-3. **Pass 2:** add to `terraform.tfvars`:
-
-   ```hcl
-   enable_custom_domain = true
-   cloudflare_zone_id   = "<zone id>"
-   cloudflare_api_token = "<scoped token>"
-   ```
-
-   then `terraform apply`. The apply waits for ACM to issue the certificate
-   (usually a few minutes once the validation record exists), attaches it to
-   CloudFront, and points `app` at the distribution. CloudFront can take
-   another ~5–15 minutes to roll out the alias.
-
-If the zone already has an `app` record, delete it first, or the create fails
-with "record already exists". Records Cloudflare added for the apex or `www` are
-left alone; they belong to the marketing site.
-
-The Cloudflare token sits in the gitignored `terraform.tfvars` and is marked
-sensitive; provider credentials are not stored in state. Treat
-`terraform.tfvars` as a secret file.
+The Cloudflare token for Terraform goes in the gitignored `terraform.tfvars`,
+marked sensitive; provider credentials are not stored in state. The server's
+copy (for certificate renewals) is the SSM parameter from step 1. It can be the
+same token.
 
 ## CI
 

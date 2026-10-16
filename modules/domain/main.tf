@@ -1,7 +1,10 @@
-# The app's hostname (app.pokemaker.fun) on the CloudFront site, with DNS
-# hosted at Cloudflare.
+# PokeMaker's hostnames in the pokemaker.fun zone (DNS hosted at Cloudflare):
 #
-# This module only ever manages records for that one hostname. The apex
+#   app.pokemaker.fun  → CloudFront (the site, with /api/* routed to the server)
+#   api.pokemaker.fun  → the API server's Elastic IP. CloudFront's origin; not
+#                        for browsers (the server only accepts CloudFront).
+#
+# This module only ever manages records for those two hostnames. The apex
 # (pokemaker.fun) and www are reserved for a separate marketing site and must
 # not be claimed here.
 #
@@ -22,8 +25,11 @@ resource "aws_acm_certificate" "app" {
     create_before_destroy = true
 
     precondition {
-      condition     = var.hostname != var.zone_name && var.hostname != "www.${var.zone_name}"
-      error_message = "${var.zone_name} and www.${var.zone_name} are reserved for the marketing site; use a subdomain such as app.${var.zone_name}."
+      condition = alltrue([
+        for host in [var.hostname, var.api_hostname] :
+        host != var.zone_name && host != "www.${var.zone_name}"
+      ])
+      error_message = "${var.zone_name} and www.${var.zone_name} are reserved for the marketing site; use subdomains such as app.${var.zone_name} and api.${var.zone_name}."
     }
   }
 }
@@ -55,4 +61,16 @@ resource "cloudflare_dns_record" "app" {
   ttl     = 300
   proxied = false
   comment = "PokeMaker app (pokemaker-infra)"
+}
+
+# The server's certificate comes from Let's Encrypt (issued on the server
+# itself), so this record only needs to point at its address.
+resource "cloudflare_dns_record" "api" {
+  zone_id = var.cloudflare_zone_id
+  name    = var.api_hostname
+  type    = "A"
+  content = var.api_ip
+  ttl     = 300
+  proxied = false
+  comment = "PokeMaker API server, CloudFront origin (pokemaker-infra)"
 }

@@ -1,5 +1,5 @@
 output "site_url" {
-  value = var.enable_custom_domain ? "https://${local.app_host}" : "https://${module.frontend.domain_name}"
+  value = "https://${local.app_host}"
 }
 
 output "site_domain" {
@@ -14,9 +14,31 @@ output "cloudfront_distribution_id" {
   value = module.frontend.distribution_id
 }
 
-output "api_endpoint" {
-  description = "Direct API Gateway URL. Also public — see README security notes."
-  value       = module.api.api_endpoint
+output "aws_region" {
+  value = var.aws_region
+}
+
+output "instance_id" {
+  description = "The API server (used by pokemaker-api's scripts/deploy.sh)."
+  value       = module.server.instance_id
+}
+
+output "api_hostname" {
+  description = "CloudFront's origin for /api/*. Only accepts requests from CloudFront."
+  value       = local.api_host
+}
+
+output "server_public_ip" {
+  value = module.server.public_ip
+}
+
+output "api_log_group" {
+  value = module.server.log_group
+}
+
+output "api_config_parameter" {
+  description = "SSM parameter holding the API's settings (applied on the next deploy)."
+  value       = module.server.config_parameter
 }
 
 output "table_name" {
@@ -25,8 +47,4 @@ output "table_name" {
 
 output "artwork_bucket" {
   value = module.storage.artwork_bucket_name
-}
-
-output "lambda_function_name" {
-  value = module.api.lambda_function_name
 }

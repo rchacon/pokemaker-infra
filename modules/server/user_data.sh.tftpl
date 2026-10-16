@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# First-boot setup for the PokeMaker API server. Rendered by Terraform
+# (templatefile) and run once by cloud-init; output goes to
+# /var/log/cloud-init-output.log. No `set -x`: some steps handle secrets.
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+log() { echo "[pokemaker-bootstrap] $*"; }
+
+# --- Settings from Terraform --------------------------------------------------
+install -d -m 0755 /etc/pokemaker
+cat > /etc/pokemaker/host.env <<'HOSTENV'
+REGION=${region}
+API_HOSTNAME=${api_hostname}
+CONFIG_PARAM=${config_param}
+ORIGIN_SECRET_PARAM=${origin_secret_param}
+IMAGE_PARAM=${image_param}
+LOG_GROUP=${log_group}
+HOSTENV
+
+# --- Packages -------------------------------------------------------------------
+log "installing packages"
+apt-get update -q
+apt-get install -y -q docker.io certbot python3-certbot-dns-cloudflare curl
+snap install aws-cli --classic
+systemctl enable --now docker
+
+# A little swap so `docker pull` and Python don't run a 1 GB instance out of memory.
+if [ ! -f /swapfile ]; then
+  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# Security updates install automatically (Ubuntu default); also allow the
+# occasional reboot they need, at a quiet hour (UTC).
+cat > /etc/apt/apt.conf.d/52pokemaker-reboot <<'APTCONF'
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "${unattended_reboot_utc_hhmm}";
+APTCONF
+
+# --- TLS certificate for the API's hostname (Let's Encrypt, DNS check) ---------
+# The DNS-01 check via Cloudflare means port 80 never has to be opened.
+log "requesting a certificate for ${api_hostname}"
+install -d -m 0700 /etc/letsencrypt
+TOKEN="$(/snap/bin/aws ssm get-parameter --region ${region} --name ${cloudflare_token_param} \
+  --with-decryption --query Parameter.Value --output text)"
+( umask 077 && printf 'dns_cloudflare_api_token = %s\n' "$TOKEN" > /etc/letsencrypt/cloudflare.ini )
+unset TOKEN
+
+# Copies the certificate where the container (uid 10001) can read it and
+# restarts the API. Runs after the first issuance and after every renewal
+# (certbot's systemd timer renews automatically).
+cat > /usr/local/sbin/pokemaker-install-cert <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+install -d -m 0755 /etc/pokemaker/tls
+install -m 0644 -o 10001 -g 10001 "$RENEWED_LINEAGE/fullchain.pem" /etc/pokemaker/tls/fullchain.pem
+install -m 0600 -o 10001 -g 10001 "$RENEWED_LINEAGE/privkey.pem" /etc/pokemaker/tls/privkey.pem
+if docker ps --format '{{.Names}}' | grep -qx pokemaker-api; then
+  docker restart pokemaker-api >/dev/null
+fi
+HOOK
+chmod 0755 /usr/local/sbin/pokemaker-install-cert
+
+EMAIL_ARGS=(--register-unsafely-without-email)
+if [ -n "${acme_email}" ]; then EMAIL_ARGS=(--email "${acme_email}"); fi
+for attempt in 1 2 3; do
+  if certbot certonly --non-interactive --agree-tos "$${EMAIL_ARGS[@]}" \
+      --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+      --dns-cloudflare-propagation-seconds 30 \
+      -d "${api_hostname}" --deploy-hook /usr/local/sbin/pokemaker-install-cert; then
+    break
+  fi
+  log "certbot attempt $attempt failed; retrying"
+  sleep $((attempt * 30))
+done
+test -f /etc/pokemaker/tls/privkey.pem
+
+# --- The deploy command -----------------------------------------------------------
+# Run by pokemaker-api's scripts/deploy.sh through SSM Run Command:
+#   pokemaker-deploy ghcr.io/rchacon/pokemaker-api:<tag>
+cat > /usr/local/bin/pokemaker-deploy <<'DEPLOY'
+#!/usr/bin/env bash
+# Pull an image, swap the API container, health-check it, roll back on failure.
+set -euo pipefail
+export PATH="/snap/bin:$PATH"
+IMAGE="$${1:?usage: pokemaker-deploy <image>}"
+# shellcheck source=/dev/null
+source /etc/pokemaker/host.env
+
+# Settings live in SSM (written by Terraform); refresh them on every deploy.
+aws ssm get-parameter --region "$REGION" --name "$CONFIG_PARAM" \
+  --query Parameter.Value --output text > /etc/pokemaker/api.env.new
+chmod 0600 /etc/pokemaker/api.env.new
+mv /etc/pokemaker/api.env.new /etc/pokemaker/api.env
+
+echo "pulling $IMAGE"
+docker pull --quiet "$IMAGE"
+PREVIOUS="$(docker inspect --format '{{.Config.Image}}' pokemaker-api 2>/dev/null || true)"
+
+run() {
+  docker rm -f pokemaker-api >/dev/null 2>&1 || true
+  docker run -d --name pokemaker-api --restart unless-stopped \
+    -p 443:8443 \
+    --env-file /etc/pokemaker/api.env \
+    -v /etc/pokemaker/tls:/tls:ro \
+    --log-driver awslogs --log-opt awslogs-region="$REGION" --log-opt awslogs-group="$LOG_GROUP" \
+    "$1" \
+    uvicorn pokemaker.main:app --host 0.0.0.0 --port 8443 \
+      --ssl-certfile /tls/fullchain.pem --ssl-keyfile /tls/privkey.pem \
+      --timeout-graceful-shutdown 20 >/dev/null
+}
+
+healthy() {
+  local secret
+  secret="$(aws ssm get-parameter --region "$REGION" --name "$ORIGIN_SECRET_PARAM" \
+    --with-decryption --query Parameter.Value --output text)"
+  for _ in $(seq 1 30); do
+    # Same path CloudFront takes: TLS for the real hostname, with the origin header.
+    if curl -fsS --max-time 5 --resolve "$API_HOSTNAME:443:127.0.0.1" \
+        -H "X-Origin-Verify: $secret" "https://$API_HOSTNAME/api/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# `run` can fail outright (e.g. the image has no uvicorn). Testing it inside the
+# `if` matters: under `set -e` a bare failure would exit right here, after the
+# old container was removed and before the rollback below.
+if run "$IMAGE" && healthy; then
+  aws ssm put-parameter --region "$REGION" --name "$IMAGE_PARAM" --type String \
+    --value "$IMAGE" --overwrite >/dev/null
+  docker image prune -af --filter "until=168h" >/dev/null || true
+  echo "deployed $IMAGE"
+else
+  echo "health check failed for $IMAGE; last log lines:" >&2
+  docker logs --tail 40 pokemaker-api >&2 || true
+  if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != "$IMAGE" ]; then
+    echo "rolling back to $PREVIOUS" >&2
+    if run "$PREVIOUS" && healthy; then
+      echo "rolled back: $PREVIOUS is serving again" >&2
+    else
+      echo "WARNING: $PREVIOUS did not come back healthy either; check the server" >&2
+    fi
+  fi
+  exit 1
+fi
+DEPLOY
+chmod 0755 /usr/local/bin/pokemaker-deploy
+
+# --- Bring the API back if this is a replacement instance ------------------------
+IMAGE="$(/snap/bin/aws ssm get-parameter --region ${region} --name ${image_param} \
+  --query Parameter.Value --output text 2>/dev/null || true)"
+if [ -n "$IMAGE" ] && [ "$IMAGE" != "None" ]; then
+  log "restoring $IMAGE"
+  /usr/local/bin/pokemaker-deploy "$IMAGE" || log "WARNING: could not start $IMAGE; run scripts/deploy.sh"
+else
+  log "no image deployed yet: run scripts/deploy.sh in pokemaker-api"
+fi
+log "done"
