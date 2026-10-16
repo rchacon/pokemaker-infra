@@ -8,6 +8,11 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
+variable "family_id" {
+  type    = string
+  default = "belchers"
+}
+
 variable "table_name" {
   type    = string
   default = "pokemaker"
@@ -32,6 +37,17 @@ variable "app_subdomain" {
   }
 }
 
+variable "api_subdomain" {
+  description = "The API server's own hostname, <api_subdomain>.<domain_name>: CloudFront's origin for /api/*, not used by browsers."
+  type        = string
+  default     = "api"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.api_subdomain)) && var.api_subdomain != "www"
+    error_message = "api_subdomain must be a single DNS label other than www."
+  }
+}
+
 variable "cloudflare_zone_id" {
   description = "Zone ID of domain_name (Cloudflare dashboard -> the domain's Overview page, right sidebar)."
   type        = string
@@ -42,6 +58,67 @@ variable "cloudflare_zone_id" {
 variable "cloudflare_api_token" {
   type      = string
   sensitive = true
+}
+
+# --- Server -----------------------------------------------------------------------
+
+variable "instance_type" {
+  description = "Graviton (arm64) instance type for the API server."
+  type        = string
+  default     = "t4g.micro"
+}
+
+variable "acme_email" {
+  description = "Email for Let's Encrypt certificate expiry notices (optional)."
+  type        = string
+  default     = null
+}
+
+variable "rate_limit_per_minute" {
+  description = "API requests per minute per client IP (a family shares one IP)."
+  type        = number
+  default     = 600
+}
+
+# --- Secrets: created with the AWS CLI, never in Terraform -----------------------
+
+variable "openai_api_key_ssm_parameter" {
+  type    = string
+  default = "/pokemaker/prod/openai-api-key"
+}
+
+variable "pin_token_secret_ssm_parameter" {
+  type    = string
+  default = "/pokemaker/prod/pin-token-secret"
+}
+
+variable "cloudflare_dns_token_ssm_parameter" {
+  description = "SecureString with a Cloudflare token (Zone:DNS:Edit on the zone) the server uses to get its TLS certificate."
+  type        = string
+  default     = "/pokemaker/prod/cloudflare-dns-token"
+}
+
+# --- Artwork ----------------------------------------------------------------------
+
+variable "artwork_provider" {
+  description = "openai, or mock to deploy without spending on image generation."
+  type        = string
+  default     = "openai"
+}
+
+variable "openai_image_model" {
+  type    = string
+  default = "gpt-image-1-mini"
+}
+
+variable "openai_image_quality" {
+  type    = string
+  default = "medium"
+}
+
+variable "daily_generation_limit" {
+  type    = number
+  default = 10
 }
 
 # --- Cost alert -------------------------------------------------------------------
