@@ -1,4 +1,6 @@
 # Static site: private S3 bucket behind CloudFront (Origin Access Control).
+# CloudFront also routes /api/* to the API server, so the app and the API share
+# one origin: no CORS, and the frontend never needs to know the API's address.
 
 resource "aws_s3_bucket" "site" {
   bucket        = var.site_bucket_name
@@ -49,13 +51,13 @@ resource "aws_s3_bucket_policy" "site" {
   policy = data.aws_iam_policy_document.site.json
 }
 
-# Runs on every request for the site:
+# Runs on every request for the site (not /api/*):
 # 1. Canonical host: any other host (in practice the raw *.cloudfront.net
 #    name) gets a 301 to https://<canonical_host> with the same path and query.
 # 2. SPA routing: app routes like /p/kid1/cards/new are served index.html,
 #    while real files (/assets/*.js, /favicon.svg) pass through. Done here
-#    rather than with custom error pages, which would rewrite every 404,
-#    including real ones from an API served by the same distribution.
+#    rather than with custom error pages, which would also rewrite the API's
+#    real 404 responses.
 resource "aws_cloudfront_function" "spa" {
   name    = "${var.name}-spa-rewrite"
   runtime = "cloudfront-js-2.0"
@@ -69,11 +71,20 @@ data "aws_cloudfront_cache_policy" "optimized" {
   name = "Managed-CachingOptimized"
 }
 
+data "aws_cloudfront_cache_policy" "disabled" {
+  name = "Managed-CachingDisabled"
+}
+
+data "aws_cloudfront_origin_request_policy" "all_except_host" {
+  name = "Managed-AllViewerExceptHostHeader"
+}
+
 data "aws_cloudfront_response_headers_policy" "security" {
   name = "Managed-SecurityHeadersPolicy"
 }
 
 locals {
+  api_origin_id  = "api"
   site_origin_id = "site"
 }
 
@@ -91,6 +102,26 @@ resource "aws_cloudfront_distribution" "site" {
     origin_access_control_id = aws_cloudfront_origin_access_control.site.id
   }
 
+  origin {
+    origin_id   = local.api_origin_id
+    domain_name = var.api_origin_hostname
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only" # the server has a Let's Encrypt certificate
+      origin_ssl_protocols   = ["TLSv1.2"]
+      # How long CloudFront waits for the first byte and between chunks. The
+      # longest wait is an artwork generation; a streamed response keeps it alive.
+      origin_read_timeout      = 60
+      origin_keepalive_timeout = 30
+    }
+    # Proves to the server that a request came through *this* distribution.
+    custom_header {
+      name  = "X-Origin-Verify"
+      value = var.origin_verify_secret
+    }
+  }
+
   default_cache_behavior {
     target_origin_id           = local.site_origin_id
     viewer_protocol_policy     = "redirect-to-https"
@@ -104,6 +135,17 @@ resource "aws_cloudfront_distribution" "site" {
       event_type   = "viewer-request"
       function_arn = aws_cloudfront_function.spa.arn
     }
+  }
+
+  ordered_cache_behavior {
+    path_pattern             = "/api/*"
+    target_origin_id         = local.api_origin_id
+    viewer_protocol_policy   = "https-only"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = false # don't buffer streamed responses (partial artwork)
+    cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_except_host.id
   }
 
   restrictions {

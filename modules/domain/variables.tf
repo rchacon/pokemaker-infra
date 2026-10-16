@@ -8,6 +8,16 @@ variable "hostname" {
   type        = string
 }
 
+variable "api_hostname" {
+  description = "The API server's hostname inside the zone, e.g. api.pokemaker.fun."
+  type        = string
+}
+
+variable "api_ip" {
+  description = "The API server's Elastic IP."
+  type        = string
+}
+
 variable "cloudflare_zone_id" {
   type = string
 }

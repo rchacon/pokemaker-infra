@@ -6,6 +6,17 @@ variable "site_bucket_name" {
   type = string
 }
 
+variable "api_origin_hostname" {
+  description = "The API server's hostname (e.g. api.pokemaker.fun), served under /api/* on the site."
+  type        = string
+}
+
+variable "origin_verify_secret" {
+  description = "Value of the X-Origin-Verify header CloudFront adds to API requests."
+  type        = string
+  sensitive   = true
+}
+
 variable "aliases" {
   description = "Optional custom hostname(s), e.g. [\"app.pokemaker.fun\"]. Requires acm_certificate_arn."
   type        = list(string)

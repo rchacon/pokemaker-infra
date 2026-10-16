@@ -10,6 +10,10 @@ terraform {
       source  = "cloudflare/cloudflare"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   # Partial configuration: bucket, key and region come from the gitignored
@@ -39,8 +43,8 @@ provider "aws" {
 }
 
 # pokemaker.fun's DNS is hosted at Cloudflare. This provider only creates the
-# records for app.pokemaker.fun (modules/domain); the apex and www belong to the
-# marketing site.
+# records for app.pokemaker.fun and api.pokemaker.fun (modules/domain); the apex
+# and www belong to the marketing site.
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
