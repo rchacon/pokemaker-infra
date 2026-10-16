@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored). Treat it as a secret file: it holds the
+# Cloudflare token.
+
+# Required: DNS for app.pokemaker.fun lives at Cloudflare.
+cloudflare_zone_id   = "<zone id from the Cloudflare dashboard>"
+cloudflare_api_token = "<token scoped to Zone:DNS:Edit on pokemaker.fun only>"
+
+# Optional (defaults shown):
+# domain_name            = "pokemaker.fun"   # apex + www are for the marketing site
+# app_subdomain          = "app"             # -> https://app.pokemaker.fun
+# budget_alert_email     = "you@example.com"
+# monthly_budget_usd     = 20
