@@ -49,8 +49,9 @@ To add another environment, copy `envs/prod` to `envs/dev` and change
 
 ## How the server works
 
-- **Image:** CI in `pokemaker-api` builds an arm64 image and publishes it to
-  `ghcr.io/rchacon/pokemaker-api` (public; nothing secret is in it).
+- **Image:** `ghcr.io/rchacon/pokemaker-api:<version>`, an arm64 image built from
+  `pokemaker-api` (public; nothing secret is in it), published by a tag-driven
+  release pipeline (pokemaker-api#3).
 - **First boot** (`modules/server/user_data.sh.tftpl`, run once by cloud-init):
   1. Installs Docker, certbot (with its Cloudflare DNS plugin) and the AWS CLI;
      adds swap; enables automatic security-update reboots at 10:00 UTC.
@@ -147,7 +148,7 @@ touched; they belong to the marketing site.
 
 ```bash
 cd ../../../pokemaker-api
-./scripts/deploy.sh main      # or sha-<commit> for a specific build
+./scripts/deploy.sh           # the version in its pyproject.toml, or pass a tag
 ```
 
 ### 4. Seed the profiles
@@ -172,8 +173,8 @@ Then open https://app.pokemaker.fun.
 
 | Task | How |
 | --- | --- |
-| Ship a new API version | Merge to `main` (CI publishes the image), then `./scripts/deploy.sh` in pokemaker-api |
-| Roll back | `./scripts/deploy.sh sha-<older commit>` |
+| Ship a new API version | Publish `ghcr.io/rchacon/pokemaker-api:<version>`, then `./scripts/deploy.sh <version>` in pokemaker-api |
+| Roll back | `./scripts/deploy.sh <older version>` |
 | Change an app setting | Edit `terraform.tfvars`, `terraform apply`, then redeploy the current tag |
 | Shell on the server | `aws ssm start-session --target "$(terraform output -raw instance_id)"` (no SSH) |
 | Follow the API's logs | `aws logs tail /pokemaker/prod/api --follow` |
